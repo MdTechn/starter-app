@@ -1,0 +1,147 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    ports:
+      - '${POSTGRES_PORT:-5432}:5432'
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-saas}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-saas_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-saas_starter}
+    volumes:
+      - saas_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -U ${POSTGRES_USER:-saas} -d ${POSTGRES_DB:-saas_starter}',
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - saas-network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '${REDIS_PORT:-6379}:6379'
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - saas_redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - saas-network
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    restart: unless-stopped
+    command: start-dev --import-realm
+    ports:
+      - '${KEYCLOAK_PORT:-8080}:8080'
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER:-admin}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: 8080
+      KC_HOSTNAME_STRICT: 'false'
+      KC_HOSTNAME_STRICT_HTTPS: 'false'
+      KC_HTTP_ENABLED: 'true'
+      KC_HEALTH_ENABLED: 'true'
+      # Social IdP credentials (substituted into realm-saas.json via ${env.*})
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      FACEBOOK_CLIENT_ID: ${FACEBOOK_CLIENT_ID:-}
+      FACEBOOK_CLIENT_SECRET: ${FACEBOOK_CLIENT_SECRET:-}
+      APPLE_CLIENT_ID: ${APPLE_CLIENT_ID:-}
+      APPLE_CLIENT_SECRET: ${APPLE_CLIENT_SECRET:-}
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+    volumes:
+      - ./keycloak/realm-saas.json:/opt/keycloak/data/import/realm-saas.json
+      - ./keycloak/themes:/opt/keycloak/themes
+    healthcheck:
+      test: ['CMD-SHELL', 'exec 3<>/dev/tcp/127.0.0.1/8080']
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 60s
+    networks:
+      - saas-network
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - '${PORT:-3001}:3001'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      DATABASE_URL: postgresql://${POSTGRES_USER:-saas}:${POSTGRES_PASSWORD:-saas_dev_password}@postgres:5432/${POSTGRES_DB:-saas_starter}?schema=public
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      KEYCLOAK_ENABLED: 'true'
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-saas-realm}
+      KEYCLOAK_ISSUER: http://keycloak:8080/realms/${KEYCLOAK_REALM:-saas-realm}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-saas-web}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-saas-web-secret-change-me}
+      KEYCLOAK_AUDIENCE: ${KEYCLOAK_AUDIENCE:-saas-web}
+      REDIS_URL: redis://redis:6379
+    volumes:
+      - ./backend:/app/backend
+      - ./prisma:/app/prisma
+      - /app/backend/node_modules
+      - /app/node_modules
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy --schema=prisma/schema.prisma && npm run start:dev -w backend"
+    networks:
+      - saas-network
+
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.dev
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: development
+      API_URL: http://api:3001
+      NEXT_PUBLIC_API_URL: http://localhost:3001/api
+      AUTH_SECRET: ${AUTH_SECRET:-dev-auth-secret-change-me-32chars-min}
+      AUTH_KEYCLOAK_ID: ${AUTH_KEYCLOAK_ID:-saas-web}
+      AUTH_KEYCLOAK_SECRET: ${AUTH_KEYCLOAK_SECRET:-}
+      AUTH_KEYCLOAK_ISSUER: ${AUTH_KEYCLOAK_ISSUER:-http://localhost:8080/realms/saas-realm}
+    volumes:
+      - ./frontend:/app/frontend
+      - ./prisma:/app/prisma
+      - /app/frontend/node_modules
+      - /app/frontend/.next
+      - /app/node_modules
+    depends_on:
+      - api
+    networks:
+      - saas-network
+
+volumes:
+  saas_pg_data:
+  saas_redis_data:
+
+networks:
+  saas-network:
+    driver: bridge

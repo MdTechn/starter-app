@@ -1,0 +1,90 @@
+/**
+ * SaaS Starter — light login theme (forced white background).
+ * Extends keycloak.v2 ; dark mode is disabled in template.ftl.
+ */
+
+:root {
+  --saas-bg: #ffffff;
+  --saas-fg: #142033;
+  --saas-muted: #5b6b7c;
+  --saas-surface: #ffffff;
+  --saas-border: #d5dee8;
+  --saas-primary: #3d9cf0;
+  --saas-primary-hover: #2f86d4;
+}
+
+html,
+html.pf-v5-theme-dark {
+  color-scheme: light;
+}
+
+.login-pf body,
+body#keycloak-bg {
+  background: var(--saas-bg) !important;
+  background-image: none !important;
+  background-color: var(--saas-bg) !important;
+  color: var(--saas-fg);
+  height: 100%;
+}
+
+#kc-header-wrapper {
+  color: var(--saas-fg) !important;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.pf-v5-c-login__main,
+.pf-v5-c-login__main.pf-m-raise {
+  background: var(--saas-surface);
+  border: 1px solid var(--saas-border);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(20, 32, 51, 0.08);
+}
+
+.pf-v5-c-login__main-header,
+.pf-v5-c-title,
+.pf-v5-c-form__label-text,
+.pf-v5-c-form__label,
+label,
+#kc-page-title {
+  color: var(--saas-fg) !important;
+}
+
+.pf-v5-c-form-control,
+.pf-v5-c-form-control input,
+input.pf-v5-c-form-control,
+input[type="text"],
+input[type="password"],
+input[type="email"] {
+  background-color: #ffffff !important;
+  color: var(--saas-fg) !important;
+  border-color: var(--saas-border) !important;
+}
+
+.pf-v5-c-button.pf-m-primary {
+  --pf-v5-c-button--m-primary--BackgroundColor: var(--saas-primary);
+  --pf-v5-c-button--m-primary--Color: #ffffff;
+  background-color: var(--saas-primary) !important;
+  border-color: var(--saas-primary) !important;
+  color: #ffffff !important;
+}
+
+.pf-v5-c-button.pf-m-primary:hover {
+  background-color: var(--saas-primary-hover) !important;
+  border-color: var(--saas-primary-hover) !important;
+}
+
+.pf-v5-c-button.pf-m-link,
+a,
+#kc-form-options a {
+  color: var(--saas-primary) !important;
+}
+
+.pf-v5-c-login__main-footer-links-item-link,
+.pf-v5-c-login__main-footer-band {
+  color: var(--saas-muted);
+}
+
+.pf-v5-c-alert {
+  border-radius: 8px;
+}

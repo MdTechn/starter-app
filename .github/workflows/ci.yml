@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master, develop]
+  pull_request:
+    branches: [main, master, develop]
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+        env:
+          DATABASE_URL: postgresql://saas:saas_dev_password@localhost:5432/saas_starter?schema=public
+          NODE_ENV: test
+          KEYCLOAK_ENABLED: 'false'
+
+      - name: Build
+        run: npm run build
+        env:
+          DATABASE_URL: postgresql://saas:saas_dev_password@localhost:5432/saas_starter?schema=public
+          AUTH_SECRET: test-auth-secret-for-ci-build-32chars
+          AUTH_KEYCLOAK_ID: saas-web
+          AUTH_KEYCLOAK_SECRET: ''
+          AUTH_KEYCLOAK_ISSUER: http://localhost:8080/realms/saas-realm

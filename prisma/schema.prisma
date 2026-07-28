@@ -1,0 +1,577 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  DISABLED
+  DELETED
+}
+
+/// Broker social utilisé via Keycloak (Keycloak reste l'IdP applicatif unique).
+enum IdentityProvider {
+  KEYCLOAK
+  GOOGLE
+  FACEBOOK
+  APPLE
+  MICROSOFT
+}
+
+enum AuthAuditEvent {
+  LOGIN_SUCCESS
+  LOGIN_FAILED
+  LOGOUT
+  TOKEN_REFRESH
+  ACCOUNT_DISABLED
+  SOCIAL_LOGIN
+}
+
+enum OrganizationStatus {
+  ACTIVE
+  DISABLED
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  EXPIRED
+  REVOKED
+}
+
+enum BillingInterval {
+  MONTHLY
+  YEARLY
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  PAUSED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  CANCELED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+/// Utilisateur synchronisé depuis Keycloak (sub = keycloakSub). Pas de mot de passe local.
+model User {
+  id           String           @id @default(cuid())
+  keycloakSub  String           @unique @map("keycloak_sub")
+  email        String           @unique
+  name         String?
+  firstName    String?          @map("first_name")
+  lastName     String?          @map("last_name")
+  avatarUrl    String?          @map("avatar_url")
+  roles        Role[]           @default([USER])
+  status       UserStatus       @default(ACTIVE)
+  provider     IdentityProvider @default(KEYCLOAK)
+  lastLoginAt  DateTime?        @map("last_login_at")
+  createdAt    DateTime         @default(now()) @map("created_at")
+  updatedAt    DateTime         @updatedAt @map("updated_at")
+
+  memberships     OrganizationMember[]
+  auditLogs       AuthAuditLog[]
+  invitationsSent UserInvitation[]
+  notifications   Notification[]
+  notificationPreferences NotificationPreference[]
+  uploadedFiles   FileAsset[]     @relation("UploadedFiles")
+  aiUsages        AiUsage[]
+
+  @@index([status, createdAt])
+  @@index([email])
+  @@map("users")
+}
+
+/// Journal d'audit sécurité IAM (Keycloak = unique IdP applicatif).
+model AuthAuditLog {
+  id        String           @id @default(cuid())
+  event     AuthAuditEvent
+  userId    String?          @map("user_id")
+  provider  IdentityProvider @default(KEYCLOAK)
+  ip        String?
+  userAgent String?          @map("user_agent") @db.Text
+  metadata  Json?
+  createdAt DateTime         @default(now()) @map("created_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([event, createdAt])
+  @@index([userId, createdAt])
+  @@map("auth_audit_logs")
+}
+
+/// Multi-tenant / workspace — billing rattaché à l'organisation.
+model Organization {
+  id          String             @id @default(cuid())
+  name        String
+  slug        String             @unique
+  description String?
+  status      OrganizationStatus @default(ACTIVE)
+  createdAt   DateTime           @default(now()) @map("created_at")
+  updatedAt   DateTime           @updatedAt @map("updated_at")
+
+  members        OrganizationMember[]
+  invitations    UserInvitation[]
+  billingAccount BillingAccount?
+  aiUsages       AiUsage[]
+  cmsFolders     CmsFolder[]
+  cmsArticles    CmsArticle[]
+
+  @@index([status])
+  @@map("organizations")
+}
+
+/// Rôle applicatif **par organisation**.
+model OrganizationMember {
+  id             String @id @default(cuid())
+  organizationId String @map("organization_id")
+  userId         String @map("user_id")
+  role           Role   @default(USER)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+/// Invitation utilisateur — email SMTP via NotificationDispatcher (USER_INVITED).
+model UserInvitation {
+  id             String           @id @default(cuid())
+  email          String
+  token          String           @unique @default(cuid())
+  role           Role             @default(USER)
+  status         InvitationStatus @default(PENDING)
+  organizationId String?          @map("organization_id")
+  invitedById    String?          @map("invited_by_id")
+  expiresAt      DateTime         @map("expires_at")
+  acceptedAt     DateTime?        @map("accepted_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  invitedBy    User?         @relation(fields: [invitedById], references: [id], onDelete: SetNull)
+
+  @@index([email, status])
+  @@index([status, expiresAt])
+  @@map("user_invitations")
+}
+
+/// Compte de facturation 1:1 avec Organization (Stripe = source paiement).
+model BillingAccount {
+  id             String   @id @default(cuid())
+  organizationId String   @unique @map("organization_id")
+  currency       String   @default("eur")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  organization  Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  stripeCustomer StripeCustomer?
+  subscriptions Subscription[]
+  payments      Payment[]
+  invoices      Invoice[]
+
+  @@map("billing_accounts")
+}
+
+/// Client Stripe lié au BillingAccount — aucun PAN / CVC stocké.
+model StripeCustomer {
+  id               String   @id @default(cuid())
+  billingAccountId String   @unique @map("billing_account_id")
+  stripeCustomerId String   @unique @map("stripe_customer_id")
+  email            String?
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  billingAccount BillingAccount @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+
+  @@map("stripe_customers")
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  billingAccountId     String             @map("billing_account_id")
+  stripeSubscriptionId String             @unique @map("stripe_subscription_id")
+  stripePriceId        String             @map("stripe_price_id")
+  planId               String             @map("plan_id")
+  interval             BillingInterval
+  status               SubscriptionStatus @default(INCOMPLETE)
+  currentPeriodStart   DateTime?          @map("current_period_start")
+  currentPeriodEnd     DateTime?          @map("current_period_end")
+  cancelAtPeriodEnd    Boolean            @default(false) @map("cancel_at_period_end")
+  canceledAt           DateTime?          @map("canceled_at")
+  trialEnd             DateTime?          @map("trial_end")
+  metadata             Json?
+  createdAt            DateTime           @default(now()) @map("created_at")
+  updatedAt            DateTime           @updatedAt @map("updated_at")
+
+  billingAccount BillingAccount @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+  payments       Payment[]
+  invoices       Invoice[]
+
+  @@index([billingAccountId, status])
+  @@index([status])
+  @@map("subscriptions")
+}
+
+model Payment {
+  id                      String        @id @default(cuid())
+  billingAccountId        String?       @map("billing_account_id")
+  subscriptionId          String?       @map("subscription_id")
+  stripePaymentIntentId   String?       @unique @map("stripe_payment_intent_id")
+  stripeCheckoutSessionId String?       @unique @map("stripe_checkout_session_id")
+  stripeInvoiceId         String?       @map("stripe_invoice_id")
+  amount                  Int
+  currency                String        @default("eur")
+  status                  PaymentStatus @default(PENDING)
+  description             String?
+  payerName               String?       @map("payer_name")
+  payerEmail              String?       @map("payer_email")
+  metadata                Json?
+  paidAt                  DateTime?     @map("paid_at")
+  createdAt               DateTime      @default(now()) @map("created_at")
+  updatedAt               DateTime      @updatedAt @map("updated_at")
+
+  billingAccount BillingAccount? @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+  subscription   Subscription?   @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([billingAccountId, createdAt])
+  @@index([status, paidAt])
+  @@index([createdAt])
+  @@map("payments")
+}
+
+model Invoice {
+  id               String        @id @default(cuid())
+  billingAccountId String        @map("billing_account_id")
+  subscriptionId   String?       @map("subscription_id")
+  stripeInvoiceId  String        @unique @map("stripe_invoice_id")
+  number           String?
+  amountDue        Int           @map("amount_due")
+  amountPaid       Int           @default(0) @map("amount_paid")
+  currency         String        @default("eur")
+  status           InvoiceStatus @default(OPEN)
+  hostedInvoiceUrl String?       @map("hosted_invoice_url")
+  invoicePdfUrl    String?       @map("invoice_pdf_url")
+  periodStart      DateTime?     @map("period_start")
+  periodEnd        DateTime?     @map("period_end")
+  paidAt           DateTime?     @map("paid_at")
+  metadata         Json?
+  createdAt        DateTime      @default(now()) @map("created_at")
+  updatedAt        DateTime      @updatedAt @map("updated_at")
+
+  billingAccount BillingAccount @relation(fields: [billingAccountId], references: [id], onDelete: Cascade)
+  subscription   Subscription?  @relation(fields: [subscriptionId], references: [id], onDelete: SetNull)
+
+  @@index([billingAccountId, createdAt])
+  @@index([status])
+  @@map("invoices")
+}
+
+enum NotificationChannel {
+  EMAIL
+  IN_APP
+  SMS
+  PUSH
+}
+
+enum NotificationStatus {
+  PENDING
+  SENT
+  FAILED
+  READ
+}
+
+enum NotificationEventType {
+  USER_CREATED
+  USER_INVITED
+  LOGIN_SECURITY
+  SUBSCRIPTION_CREATED
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  CMS_PUBLISHED
+}
+
+/// Notification persistée (in-app / email / canaux futurs).
+model Notification {
+  id        String                @id @default(cuid())
+  userId    String?               @map("user_id")
+  email     String?
+  eventType NotificationEventType @map("event_type")
+  channel   NotificationChannel
+  status    NotificationStatus    @default(PENDING)
+  title     String
+  body      String                @db.Text
+  payload   Json?
+  error     String?               @db.Text
+  sentAt    DateTime?             @map("sent_at")
+  readAt    DateTime?             @map("read_at")
+  createdAt DateTime              @default(now()) @map("created_at")
+  updatedAt DateTime              @updatedAt @map("updated_at")
+
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([userId, status, createdAt])
+  @@index([eventType, createdAt])
+  @@index([channel, status])
+  @@map("notifications")
+}
+
+/// Template par événement + canal ({{variables}}).
+model NotificationTemplate {
+  id           String                @id @default(cuid())
+  eventType    NotificationEventType @map("event_type")
+  channel      NotificationChannel
+  subject      String?
+  bodyTemplate String                @map("body_template") @db.Text
+  enabled      Boolean               @default(true)
+  createdAt    DateTime              @default(now()) @map("created_at")
+  updatedAt    DateTime              @updatedAt @map("updated_at")
+
+  @@unique([eventType, channel])
+  @@map("notification_templates")
+}
+
+/// Préférences utilisateur par type d'événement.
+model NotificationPreference {
+  id          String                @id @default(cuid())
+  userId      String                @map("user_id")
+  eventType   NotificationEventType @map("event_type")
+  emailEnabled Boolean              @default(true) @map("email_enabled")
+  inAppEnabled Boolean              @default(true) @map("in_app_enabled")
+  smsEnabled   Boolean              @default(false) @map("sms_enabled")
+  pushEnabled  Boolean              @default(false) @map("push_enabled")
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, eventType])
+  @@index([userId])
+  @@map("notification_preferences")
+}
+
+enum FileKind {
+  IMAGE
+  DOCUMENT
+  AVATAR
+}
+
+enum StorageDriverKind {
+  LOCAL
+  S3
+  CLOUDINARY
+}
+
+/// Fichier stocké via StorageProvider (local / S3 / Cloudinary stub).
+/// Lien générique : ownerType + ownerId (User, Organization, …).
+model FileAsset {
+  id           String            @id @default(cuid())
+  key          String            @unique
+  filename     String
+  originalName String            @map("original_name")
+  mimeType     String            @map("mime_type")
+  size         Int
+  kind         FileKind
+  driver       StorageDriverKind
+  url          String
+  ownerType    String?           @map("owner_type")
+  ownerId      String?           @map("owner_id")
+  uploadedById String?           @map("uploaded_by_id")
+  metadata     Json?
+  createdAt    DateTime          @default(now()) @map("created_at")
+  updatedAt    DateTime          @updatedAt @map("updated_at")
+
+  uploadedBy User? @relation("UploadedFiles", fields: [uploadedById], references: [id], onDelete: SetNull)
+
+  @@index([ownerType, ownerId])
+  @@index([uploadedById, createdAt])
+  @@index([kind, createdAt])
+  @@map("file_assets")
+}
+
+/// ——— CMS Multilingue (Epic 9 Phase 1) ———
+
+enum CmsArticleStatus {
+  DRAFT
+  REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+/// Dossier CMS — hiérarchie illimitée via parentId. Code unique. Scopé par organisation.
+model CmsFolder {
+  id             String   @id @default(cuid())
+  code           String   @unique
+  name           String
+  description    String?
+  parentId       String?  @map("parent_id")
+  organizationId String?  @map("organization_id")
+  sortOrder      Int      @default(0) @map("sort_order")
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  parent       CmsFolder?    @relation("CmsFolderTree", fields: [parentId], references: [id], onDelete: Restrict)
+  children     CmsFolder[]   @relation("CmsFolderTree")
+  articles     CmsArticle[]
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([parentId, sortOrder])
+  @@index([organizationId])
+  @@map("cms_folders")
+}
+
+/// Article CMS — slug unique. Pièces jointes via FileAsset (ownerType=CmsArticle).
+/// Scopé par organisation (filtre multi-tenant).
+model CmsArticle {
+  id             String           @id @default(cuid())
+  folderId       String           @map("folder_id")
+  organizationId String?          @map("organization_id")
+  slug           String           @unique
+  status         CmsArticleStatus @default(DRAFT)
+  /// Prep SEO global (Phase ultérieure).
+  seoMeta        Json?            @map("seo_meta")
+  /// Prep métadonnées IA (Phase ultérieure).
+  aiMeta         Json?            @map("ai_meta")
+  /// Prep workflow éditorial (Phase ultérieure).
+  workflowState  String?          @map("workflow_state")
+  createdById    String?          @map("created_by_id")
+  updatedById    String?          @map("updated_by_id")
+  publishedAt    DateTime?        @map("published_at")
+  createdAt      DateTime         @default(now()) @map("created_at")
+  updatedAt      DateTime         @updatedAt @map("updated_at")
+
+  folder       CmsFolder         @relation(fields: [folderId], references: [id], onDelete: Restrict)
+  organization Organization?     @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  translations CmsTranslation[]
+  versions     CmsVersion[]
+
+  @@index([folderId, status])
+  @@index([organizationId, status])
+  @@index([status, updatedAt])
+  @@map("cms_articles")
+}
+
+/// Une traduction par langue et par article.
+model CmsTranslation {
+  id              String   @id @default(cuid())
+  articleId       String   @map("article_id")
+  locale          String
+  title           String
+  excerpt         String?
+  content         String   @db.Text
+  /// Prep SEO par locale (Phase ultérieure).
+  seoTitle        String?  @map("seo_title")
+  seoDescription  String?  @map("seo_description")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  article CmsArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@unique([articleId, locale])
+  @@index([locale])
+  @@map("cms_translations")
+}
+
+/// Historique de versions — snapshot JSON pour rollback.
+model CmsVersion {
+  id          String   @id @default(cuid())
+  articleId   String   @map("article_id")
+  version     Int
+  snapshot    Json
+  note        String?
+  createdById String?  @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  article CmsArticle @relation(fields: [articleId], references: [id], onDelete: Cascade)
+
+  @@unique([articleId, version])
+  @@index([articleId, createdAt])
+  @@map("cms_versions")
+}
+
+/// Compteur d'usage IA par organisation / utilisateur (traduction / réécriture CMS).
+model AiUsage {
+  id             String   @id @default(cuid())
+  organizationId String?  @map("organization_id")
+  userId         String?  @map("user_id")
+  provider       String
+  operation      String
+  tokensUsed     Int      @default(0) @map("tokens_used")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  user         User?         @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([userId, createdAt])
+  @@index([provider, operation])
+  @@map("ai_usages")
+}
+
+/// Idempotence des webhooks externes (Stripe, …).
+model ProcessedWebhookEvent {
+  id          String   @id @default(cuid())
+  provider    String
+  eventId     String   @map("event_id")
+  eventType   String?  @map("event_type")
+  processedAt DateTime @default(now()) @map("processed_at")
+  metadata    Json?
+
+  @@unique([provider, eventId])
+  @@index([processedAt])
+  @@map("processed_webhook_events")
+}
+
+/// White-label runtime overrides (singleton id=`default`) — merge sur env.
+model BrandSettings {
+  id              String   @id @default("default")
+  appName         String?  @map("app_name")
+  companyName     String?  @map("company_name")
+  appUrl          String?  @map("app_url")
+  logoUrl         String?  @map("logo_url")
+  faviconUrl      String?  @map("favicon_url")
+  primaryColor    String?  @map("primary_color")
+  secondaryColor  String?  @map("secondary_color")
+  theme           String?
+  fontFamily      String?  @map("font_family")
+  iconUrl         String?  @map("icon_url")
+  appleTouchIconUrl String? @map("apple_touch_icon_url")
+  supportEmail    String?  @map("support_email")
+  supportUrl      String?  @map("support_url")
+  metaDescription String?  @map("meta_description")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("brand_settings")
+}

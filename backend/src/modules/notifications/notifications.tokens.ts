@@ -1,0 +1,1 @@
+export const NOTIFICATION_QUEUE = Symbol('NOTIFICATION_QUEUE');
